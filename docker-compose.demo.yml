@@ -1,0 +1,62 @@
+# Local end-to-end demo on a single host:
+#   source (two lossy paths) -> relay (fill-in/skip) -> sink (verification)
+#
+#   docker compose -f docker-compose.demo.yml up --build
+#
+# While it runs (or afterwards, the relay stays up):
+#   curl -s localhost:8000/skipped
+#   curl -s localhost:8000/status
+services:
+  relay:
+    build: .
+    image: rtp-dual-path-relay:latest
+    container_name: rtp-relay-demo
+    ports:
+      - "8000:8000"
+      - "9100:9100/udp"
+      - "9101:9101/udp"
+    environment:
+      UDP_PORT_A: "9100"
+      UDP_PORT_B: "9101"
+      FORWARD_HOST: "127.0.0.1"
+      FORWARD_PORT: "9200"
+      RELAY_WINDOW: "64"
+      GAP_TIMEOUT_MS: "80"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status==200 else 1)"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  sink:
+    image: rtp-dual-path-relay:latest
+    container_name: rtp-sink-demo
+    depends_on:
+      relay:
+        condition: service_healthy
+    network_mode: "service:relay"
+    command: ["python", "-m", "demo.demo_sink", "--host", "127.0.0.1",
+              "--port", "9200", "--duration", "4.5",
+              "--api-url", "http://127.0.0.1:8000"]
+
+  source:
+    image: rtp-dual-path-relay:latest
+    container_name: rtp-source-demo
+    depends_on:
+      relay:
+        condition: service_healthy
+      sink:
+        condition: service_started
+    network_mode: "service:relay"
+    # A loses 10,20,30; B loses 15,30 -> 30 is missing on both (real skip),
+    # the others are filled from the opposite path.
+    # B's copies of 10 and 40 arrive 40 ms late -> 10 is recovered during the
+    # head-gap wait (gaps_recovered), inside the 80 ms budget.
+    # Both paths fall silent for 300 ms after seq 50 -> timer still fires.
+    command: ["python", "-m", "demo.demo_source",
+              "--host", "127.0.0.1",
+              "--port-a", "9100", "--port-b", "9101",
+              "--duration", "3.5", "--packets-per-sec", "50",
+              "--loss-a", "10,20,30", "--loss-b", "15,30",
+              "--late-b", "10:0.04,40:0.04",
+              "--silence-after", "50", "--silence-ms", "300"]

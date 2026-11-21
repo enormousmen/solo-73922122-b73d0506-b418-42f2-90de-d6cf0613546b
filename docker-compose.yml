@@ -1,0 +1,28 @@
+# Production-style deployment: only the relay.
+# Receive the two paths on UDP 9100/9101 and send the recovered stream to the
+# playout machine configured via FORWARD_HOST/FORWARD_PORT.
+services:
+  relay:
+    build: .
+    image: rtp-dual-path-relay:latest
+    container_name: rtp-relay
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "9100:9100/udp"
+      - "9101:9101/udp"
+    environment:
+      UDP_PORT_A: "9100"
+      UDP_PORT_B: "9101"
+      # Override with the real playout machine on the shared Docker network.
+      FORWARD_HOST: "${FORWARD_HOST:-127.0.0.1}"
+      FORWARD_PORT: "9200"
+      API_HOST: "0.0.0.0"
+      API_PORT: "8000"
+      RELAY_WINDOW: "64"
+      GAP_TIMEOUT_MS: "80"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
