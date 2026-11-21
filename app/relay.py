@@ -17,6 +17,11 @@ Business rules (see README for the full spec):
   number is skipped and forwarding continues.
 * Skipped sequence numbers are retained (newest first, last 64) and exposed
   through FastAPI.
+* Merged packets are handed to :class:`RateLimitedForwarder`, which applies
+  the configurable byte-rate token bucket *after* merging, in merge order,
+  without touching packet contents. Merge progress (sequence numbers, gap
+  waits, skips) is independent of send pacing: waiting for send credit never
+  stops ingress or gap handling.
 
 The engine is entirely single-threaded: every method runs inside one asyncio
 event loop, so plain containers need no locking.
@@ -28,6 +33,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .forwarder import RateLimitedForwarder
 from .rtp import is_rtp_packet, seq_delta, sequence_number
 
 
@@ -37,19 +43,18 @@ class RelayStats:
     duplicates: int = 0          # packets whose seq was already buffered/sent
     out_of_window: int = 0       # packets beyond the 64-position window
     invalid: int = 0             # non-RTP datagrams
-    forwarded: int = 0
+    forwarded: int = 0           # packets successfully handed to UDP
     skipped: int = 0
     gaps_recovered: int = 0      # gaps closed by a copy from either path
     gaps_timed_out: int = 0      # gaps that ended in a skip
     send_errors: int = 0
+    rate_limit_drops: int = 0    # dropped because no send credit/backlog room
     path_received: dict = field(default_factory=lambda: {"A": 0, "B": 0})
 
 
 class RelayEngine:
     def __init__(self, settings, forward_transport: asyncio.DatagramTransport,
                  loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
-        self._settings = settings
-        self._transport = forward_transport
         self._loop = loop or asyncio.get_event_loop()
         self._modulus = settings.seq_modulus
         self._window = settings.window
@@ -66,6 +71,16 @@ class RelayEngine:
         # newest first.
         self._skipped: deque[int] = deque(maxlen=64)
         self.stats = RelayStats()
+
+        self._forwarder = RateLimitedForwarder(
+            forward_transport,
+            (settings.forward_host, settings.forward_port),
+            self.stats,
+            rate_bps=settings.rate_bps,
+            burst_bytes=settings.burst_bytes,
+            max_backlog_bytes=settings.max_backlog_bytes,
+            loop=self._loop,
+        )
 
     # ------------------------------------------------------------------ API
 
@@ -105,7 +120,7 @@ class RelayEngine:
         return list(self._skipped)
 
     def status(self) -> dict:
-        return {
+        status = {
             "next_seq": self._next_seq,
             "buffered": len(self._buffer),
             "gap_wait_active": self._gap_active,
@@ -114,20 +129,28 @@ class RelayEngine:
                 if self._gap_deadline is not None else None
             ),
             "recent_skipped": self.recent_skipped(),
+            # Convenience mirror of stats.rate_limit_drops next to backlog.
+            "rate_limit_drops": self.stats.rate_limit_drops,
             "stats": self.stats.__dict__.copy(),
         }
+        status.update(self._forwarder.status())
+        return status
 
     async def aclose(self) -> None:
         self._cancel_timer()
         self._gap_active = False
+        self._forwarder.close()
 
     # -------------------------------------------------------------- internals
 
     def _deliver(self, seq: int, data: bytes) -> None:
+        """Hand an in-order merged packet to the pacing forwarder.
+
+        The pending sequence advances immediately: pacing decisions belong to
+        the forwarder and must never stall dedup, gap handling or ingress.
+        """
         try:
-            self._transport.sendto(data, (self._settings.forward_host,
-                                          self._settings.forward_port))
-            self.stats.forwarded += 1
+            self._forwarder.offer_packet(data)
         except Exception:  # pragma: no cover - defensive, never kill the loop
             self.stats.send_errors += 1
         finally:

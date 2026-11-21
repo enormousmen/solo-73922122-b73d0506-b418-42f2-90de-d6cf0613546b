@@ -19,6 +19,10 @@ python demo/demo_source.py --duration 3 --loss-a 40 --late-b 40:0.04
 # Both paths go silent for 300 ms after seq 50 -> the relay still skips the
 # gap on time and keeps forwarding afterwards.
 python demo/demo_source.py --duration 4 --silence-after 50 --silence-ms 300
+
+# Send 10 packets back-to-back at seq 60 (emulating a gap-fill burst), while
+# the relay's byte-rate shaper smooths them out for the playout machine.
+python demo/demo_source.py --duration 4 --burst-at 60 --burst-packets 10
 """
 from __future__ import annotations
 
@@ -94,6 +98,19 @@ class DemoSource:
                         and seq == self.args.silence_after):
                     await asyncio.sleep(self.args.silence_ms / 1000.0)
 
+                # Optional instant burst: send several packets at once so the
+                # relay's post-merge shaper has something to smooth.
+                if (self.args.burst_at is not None
+                        and seq == self.args.burst_at):
+                    for offset in range(self.args.burst_packets):
+                        burst_seq = (seq + offset) & 0xFFFF
+                        self._send_now(self._transport_a, burst_seq,
+                                       self.args.port_a)
+                        self._send_now(self._transport_b, burst_seq,
+                                       self.args.port_b)
+                    seq = (seq + self.args.burst_packets) & 0xFFFF
+                    continue
+
                 packet_time = loop.time()
                 if seq not in self.loss_a and not self._maybe_random_drop("A"):
                     await self._send_one(self._transport_a, seq,
@@ -125,6 +142,15 @@ class DemoSource:
                   f"path B sent {self.sent_b}, next seq would be {seq}",
                   file=sys.stderr)
 
+    def _send_now(self, transport: asyncio.DatagramTransport,
+                  seq: int, port: int) -> None:
+        """Fire one packet on one path without awaiting."""
+        transport.sendto(build_packet(seq), (self.args.host, port))
+        if port == self.args.port_a:
+            self.sent_a += 1
+        else:
+            self.sent_b += 1
+
     async def _late_send(self, transport: asyncio.DatagramTransport,
                          seq: int, addr: tuple[str, int], delay: float) -> None:
         await asyncio.sleep(delay)
@@ -151,6 +177,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--silence-after", type=int, default=None,
                    help="seq at which both paths go silent for --silence-ms")
     p.add_argument("--silence-ms", type=float, default=300.0)
+    p.add_argument("--burst-at", type=int, default=None,
+                   help="seq at which to emit an instant back-to-back burst")
+    p.add_argument("--burst-packets", type=int, default=10,
+                   help="packets sent at once by --burst-at (default 10)")
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args(argv)
 

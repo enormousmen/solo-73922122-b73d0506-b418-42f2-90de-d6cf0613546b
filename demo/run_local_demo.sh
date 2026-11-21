@@ -51,6 +51,9 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "[demo] starting relay (ingress UDP $PORT_A/$PORT_B -> forward UDP $FWD_PORT, API $API_PORT)"
+RELAY_RATE_BPS="${RELAY_RATE_BPS:-12000}" \
+RELAY_BURST_BYTES="${RELAY_BURST_BYTES:-344}" \
+RELAY_MAX_BACKLOG_BYTES="${RELAY_MAX_BACKLOG_BYTES:-3440}" \
 API_PORT="$API_PORT" UDP_PORT_A="$PORT_A" UDP_PORT_B="$PORT_B" \
   FORWARD_HOST=127.0.0.1 FORWARD_PORT="$FWD_PORT" \
   python3 -u -m app.main >"$LOG_DIR/relay.log" 2>&1 &
@@ -74,13 +77,14 @@ python3 -u -m demo.demo_sink --host 127.0.0.1 --port "$FWD_PORT" \
 SINK_PID=$!
 
 sleep 0.3
-echo "[demo] starting lossy dual-path source"
+echo "[demo] starting lossy dual-path source (with a 10-packet burst at seq 60)"
 python3 -u -m demo.demo_source --host 127.0.0.1 \
   --port-a "$PORT_A" --port-b "$PORT_B" \
   --duration 3.5 --packets-per-sec 50 \
   --loss-a 10,20,30 --loss-b 15,30 \
   --late-b 10:0.04,40:0.04 \
   --silence-after 50 --silence-ms 300 \
+  --burst-at 60 --burst-packets 10 \
   >"$LOG_DIR/source.log" 2>&1
 
 # Block until the sink finishes reporting; cleanup() then stops the relay.

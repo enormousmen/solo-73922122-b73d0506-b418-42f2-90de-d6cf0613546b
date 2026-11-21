@@ -21,6 +21,12 @@ services:
       API_PORT: "8000"
       RELAY_WINDOW: "64"
       GAP_TIMEOUT_MS: "80"
+      # Post-merge send pacing, charged in bytes of the original RTP packets.
+      # RELAY_RATE_BPS=0 (default) disables pacing; set rate and burst
+      # together. RELAY_MAX_BACKLOG_BYTES=0 derives a finite default.
+      RELAY_RATE_BPS: "${RELAY_RATE_BPS:-0}"
+      RELAY_BURST_BYTES: "${RELAY_BURST_BYTES:-0}"
+      RELAY_MAX_BACKLOG_BYTES: "${RELAY_MAX_BACKLOG_BYTES:-0}"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status==200 else 1)"]
       interval: 10s

@@ -22,6 +22,12 @@ services:
       FORWARD_PORT: "9200"
       RELAY_WINDOW: "64"
       GAP_TIMEOUT_MS: "80"
+      # Post-merge send pacing (bytes of the original RTP packets).
+      # 12000 B/s ~= 70 packets/s, comfortably above the 50 pps source, so
+      # the steady stream is passed through promptly while a burst is paced.
+      RELAY_RATE_BPS: "12000"
+      RELAY_BURST_BYTES: "344"          # two 172-byte packets at once
+      RELAY_MAX_BACKLOG_BYTES: "3440"   # at most 20 packets may wait
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status==200 else 1)"]
       interval: 3s
@@ -53,10 +59,14 @@ services:
     # B's copies of 10 and 40 arrive 40 ms late -> 10 is recovered during the
     # head-gap wait (gaps_recovered), inside the 80 ms budget.
     # Both paths fall silent for 300 ms after seq 50 -> timer still fires.
+    # A 10-packet instant burst at seq 60 exercises the byte-rate shaper:
+    # the sink's inter-arrival stats show the traffic smoothed to <= 12 kB/s
+    # (plus one 344-byte burst), with nothing reordered or dropped.
     command: ["python", "-m", "demo.demo_source",
               "--host", "127.0.0.1",
               "--port-a", "9100", "--port-b", "9101",
               "--duration", "3.5", "--packets-per-sec", "50",
               "--loss-a", "10,20,30", "--loss-b", "15,30",
               "--late-b", "10:0.04,40:0.04",
-              "--silence-after", "50", "--silence-ms", "300"]
+              "--silence-after", "50", "--silence-ms", "300",
+              "--burst-at", "60", "--burst-packets", "10"]

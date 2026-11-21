@@ -26,6 +26,11 @@ async def serve(settings: Settings) -> None:
                 settings.port_a, settings.port_b)
     logger.info("Forwarding recovered stream to %s:%d (UDP)",
                 settings.forward_host, settings.forward_port)
+    if settings.rate_bps > 0:
+        logger.info(
+            "Forward pacing: %d B/s, burst %d B, backlog cap %d B",
+            settings.rate_bps, settings.burst_bytes,
+            engine.status()["max_backlog_bytes"])
 
     app = create_app(engine)
     server = uvicorn.Config(app, host=settings.api_host, port=settings.api_port,
